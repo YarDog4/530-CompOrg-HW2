@@ -8,6 +8,7 @@
 #include <vector>
 #include <sstream>
 #include <cstdio>
+#include <unordered_map>
 
 using namespace std;
 
@@ -43,6 +44,31 @@ struct Instruction {
     string rd, rs1, rs2;
     int address = -1;
 };
+
+struct ROB {
+    bool busy, ready;
+    string destination;
+    int instructionInd;
+};
+
+struct Reservation {
+    bool busy;
+    InstructionType operand;
+    int instructionInd;
+    int robInd;
+    
+    bool vjReady, vkReady;
+    int qj, qk;
+    
+    int cyclesLeft;
+    bool execStart, execDone;
+};
+
+//vectors needed for pipeline
+vector<Instruction> instructions;
+vector<ROB> ROB;
+vector<Reservation> ADDR, FPAdd, FPMul, INT;
+unordered_map<string, int> status;
 
 Instruction parseTrace(const string &line) {
     Instruction instruction;
@@ -235,6 +261,46 @@ Config parseConfig() {
     return config;
 }
 
+void issue() {
+
+}
+
+void execute() {
+
+}
+
+void memory() {
+
+}
+
+void write() {
+
+}
+
+void commit() {
+
+}
+
+bool done() {
+    for (size_t i = 0; i < program.size(); i++) {
+        if(program[i].commit == -1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void doAll() {
+    int cycle = 1;
+    while(!done()) {
+        issue(cycle);
+        execute(cycle);
+        memory(cycle);
+        write(cycle);
+        commit(cycle);
+        cycle++;
+    }
+}
 
 int main() {
     Config config = parseConfig();
@@ -247,6 +313,7 @@ int main() {
         }
         trace.push_back(parseTrace(line));
     }
+
 
     cout << "Configuration" << endl;
     cout << "-------------" << endl;
