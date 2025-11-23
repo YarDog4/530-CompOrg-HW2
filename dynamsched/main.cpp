@@ -3,7 +3,7 @@
 //11/16/2025
 
 #include <iostream>
-#include <strinh>
+#include <string>
 #include <fstream>
 
 using namespace std;
@@ -45,9 +45,135 @@ Instruction parseTrace(const string &line) {
     Instruction instruction;
     instruction.trace_string = line;
 
-    string operand;
-    string
-}
+    string opcode;
+    string other;
+
+    stringstream ss(line);
+    ss >> opcode; //ex: flw
+    getline(ss, opcode); //ex: f6,32(x2):0
+
+    if(!other.empty() && other[0] == " ") {
+        other.erase(0,1); //remove leading spaces
+    }
+
+    //instructions
+    if(opcode == "flw") {
+        instruction.type = FLW;
+    } else if (opcode == "lw") {
+        instruction.type = LW;
+    } else if (opcode == "sw") {
+        instruction.type = SW;
+    } else if (opcode == "fsw") {
+        instruction.type = FSW;
+    } else if (opcode == "add") {
+        instruction.type = ADD;
+    } else if (opcode == "sub") {
+        instruction.type = SUB;
+    } else if (opcode == "beq") {
+        instruction.type = BEQ;
+    } else if (opcode == "bne") {
+        instruction.type = BNE;
+    } else if (opcode == "fadd.s") {
+        instruction.type = FADD_S;
+    } else if (opcode == "fsub.s") {
+        instruction.type = FSUB_S;
+    } else if (opcode == "fmul.s") {
+        instruction.type = FMUL_S;
+    } else if (opcode == "fdiv.s") {
+        instruction.type = FDIV_S;
+    }
+
+    //memory disambiguation
+    int memory = -1;
+    string operandString = other;
+
+    size_t colon = other.find(":");
+    if (colon != string::npos) {
+        memory = stoi(other.substr(colon + 1)); //after the :
+        operandString = other.substr(0, colon); //before the :
+    }
+
+    instruction.address = memory;
+
+    //remove spaces from the operand
+    operandString.erase(remove(operandString.begin(), operandString.end(), " "), operandString.end())
+
+    //instruction deconstruction
+    //loads and stores
+    if(instruction.type == FLW || instruction.type == LW || instruction.type == FSW || instruction.type == SW) {
+        vector<string> parts;
+        string temp;
+        stringstream opss(operandString);
+        while (getline(opss, temp, ',')) {
+            parts.push_back(temp);
+        }
+
+        instruction.rd = parts[0];
+
+        //offset base (the number before the ())
+        string offsetBase = parts[1];
+        size_t left = offsetBase.find("(");
+        size_t right = offsetBase.find(")");
+
+        instruction.rs1 = offsetBase.substr(lp + 1, rp - lp - 1);
+        print(instruction.rs1);
+        instruction.rs1 = ""; //no second register
+
+        return instruction;
+    }
+
+    //integer arithmetic
+    if(instruction.type == ADD || instruction.type == SUB) {
+        vector<string> parts;
+        string temp;
+        stringstream opss(operandString);
+        while (getline(opss, temp, ',')) {
+            parts.push_back(temp);
+        }
+
+        instruction.rd = parts[0];
+        instruction.rs1 = parts[1];
+        instruction.rs2 = parts[2];
+
+        return instruction;
+    }
+
+    //branches
+    if(instruction.type == BEQ || instruction.type == BNE) {
+        vector<string> parts;
+        string temp;
+        stringstream opss(operandString);
+        while (getline(opss, temp, ',')) {
+            parts.push_back(temp);
+        }
+
+        instruction.rd = ""; //no destination and label is ignored
+        instruction.rs1 = parts[0];
+        instruction.rs2 = parts[1];
+
+        return instruction;
+    }
+
+    //floating point
+    if(instruction.type == FADD_S || instruction.type == FSUB_S || instruction.type == FDIV_S || instruction.type == FMUL_S) {
+        vector<string> parts;
+        string temp;
+        stringstream opss(operandString);
+        while (getline(opss, temp, ',')) {
+            parts.push_back(temp);
+        }
+
+        instruction.rd = parts[0];
+        instruction.rs1 = parts[1];
+        instruction.rs2 = parts[2];
+
+        return instruction;
+    }
+
+    return instruction;
+
+};
+
 Config parseConfig() {
     Config config;
     ifstream fin("config.txt");
@@ -67,7 +193,7 @@ Config parseConfig() {
             sscanf(configText.c_str(), "fp adds: %d", &config.fp_adds);
             //fp muls parse
             getline(fin, configText);
-            sscanf(configText.c_str(), "ints: %d", &config.ints);
+            sscanf(configText.c_str(), "fp muls: %d", &config.fp_muls);
             //ints parse
             getline(fin, configText);
             sscanf(configText.c_str(), "ints: %d", &config.ints);
@@ -89,10 +215,21 @@ Config parseConfig() {
             sscanf(configText.c_str(), "fp_div: %d", &config.fp_div);
         }
     }
-}
+
+    return config;
+};
 
 int main() {
-    Config config;
+    Config config = parseConfig();
+
+    vector<Instruction> trace;
+    string line;
+    while(getline(cin, line)) {
+        if(line.emptpy()) {
+            continue;
+        }
+        trace.push_back(parseTrace(line));
+    }
 
     cout << "Configuration" << endl;
     cout << "-------------" << endl;
@@ -101,7 +238,7 @@ int main() {
     cout << "    fp adds: " << config.fp_adds << endl;
     cout << "    fp muls: " << config.fp_muls << endl;
     cout << "       ints: " << config.ints << endl;
-    cout << "    reorder: " << config.reoder << endl;
+    cout << "    reorder: " << config.reorder << endl;
     cout << endl;
 
     cout << "latencies: " << endl;
@@ -110,6 +247,27 @@ int main() {
     cout << "   fp mul: " << config.fp_mul << endl;
     cout << "   fp div: " << config.fp_div << endl;
 
+    cout << endl;
+    cout << endl;
+
+    cout <<                    Pipeline Simulation                    << endl;
+    cout << ----------------------------------------------------------- << endl;
+
+    //TABLE HERE
+
+    cout << endl;
+    cout << endl;
+
+    cout << "Delays" << endl;
+    cout << "------" << endl;
+
+    cout << "reorder buffer delays: " << endl;
+    cout << "reservation station delays: " << endl;
+    cout << "data memory conflict delays: " << endl;
+    cout << "true dependence delays " << endl;
     return 0;
 }
+
+// Speculative Dynamically Scheduled Pipeline Simulator
+// Reference-style implementation for COSC 530-like assignment
 
