@@ -5,6 +5,9 @@
 #include <iostream>
 #include <string>
 #include <fstream>
+#include <vector>
+#include <sstream>
+#include <cstdio>
 
 using namespace std;
 
@@ -50,9 +53,9 @@ Instruction parseTrace(const string &line) {
 
     stringstream ss(line);
     ss >> opcode; //ex: flw
-    getline(ss, opcode); //ex: f6,32(x2):0
+    getline(ss, other); //ex: f6,32(x2):0
 
-    if(!other.empty() && other[0] == " ") {
+    if(!other.empty() && other[0] == ' ') {
         other.erase(0,1); //remove leading spaces
     }
 
@@ -96,7 +99,13 @@ Instruction parseTrace(const string &line) {
     instruction.address = memory;
 
     //remove spaces from the operand
-    operandString.erase(remove(operandString.begin(), operandString.end(), " "), operandString.end())
+    string clean;
+    for(char c : operandString) {
+        if (c != ' ') {
+            clean.push_back(c);
+        }
+    }
+    operandString = clean;
 
     //instruction deconstruction
     //loads and stores
@@ -115,9 +124,8 @@ Instruction parseTrace(const string &line) {
         size_t left = offsetBase.find("(");
         size_t right = offsetBase.find(")");
 
-        instruction.rs1 = offsetBase.substr(lp + 1, rp - lp - 1);
-        print(instruction.rs1);
-        instruction.rs1 = ""; //no second register
+        instruction.rs1 = offsetBase.substr(left + 1, right - left - 1);
+        instruction.rs2 = ""; //no second register
 
         return instruction;
     }
@@ -131,10 +139,11 @@ Instruction parseTrace(const string &line) {
             parts.push_back(temp);
         }
 
-        instruction.rd = parts[0];
-        instruction.rs1 = parts[1];
-        instruction.rs2 = parts[2];
-
+        if(parts.size() == 3) {
+            instruction.rd = parts[0];
+            instruction.rs1 = parts[1];
+            instruction.rs2 = parts[2];
+        }
         return instruction;
     }
 
@@ -147,10 +156,11 @@ Instruction parseTrace(const string &line) {
             parts.push_back(temp);
         }
 
-        instruction.rd = ""; //no destination and label is ignored
-        instruction.rs1 = parts[0];
-        instruction.rs2 = parts[1];
-
+        if (parts.size() >= 2) {
+            instruction.rd = ""; //no destination and label is ignored
+            instruction.rs1 = parts[0];
+            instruction.rs2 = parts[1];
+        }
         return instruction;
     }
 
@@ -163,10 +173,11 @@ Instruction parseTrace(const string &line) {
             parts.push_back(temp);
         }
 
-        instruction.rd = parts[0];
-        instruction.rs1 = parts[1];
-        instruction.rs2 = parts[2];
-
+        if (parts.size() == 3) {
+            instruction.rd = parts[0];
+            instruction.rs1 = parts[1];
+            instruction.rs2 = parts[2];
+        }
         return instruction;
     }
 
@@ -184,30 +195,35 @@ Config parseConfig() {
             continue;
         }
 
-        if(configText.find("buffers") != string::npos) {
-            //eff_addr parse
+        if (configText == "buffers") {
+            // skip blank line
+            getline(fin, configText);
+            //addr parse
             getline(fin, configText);
             sscanf(configText.c_str(), "eff addr: %d", &config.eff_addr);
-            //fp adds parse
+            //adds parse
             getline(fin, configText);
             sscanf(configText.c_str(), "fp adds: %d", &config.fp_adds);
-            //fp muls parse
+            //mult parse
             getline(fin, configText);
             sscanf(configText.c_str(), "fp muls: %d", &config.fp_muls);
             //ints parse
             getline(fin, configText);
             sscanf(configText.c_str(), "ints: %d", &config.ints);
-            //reorder parse
+            //reorder partse
             getline(fin, configText);
             sscanf(configText.c_str(), "reorder: %d", &config.reorder);
-        } else if(configText.find("latencies") != string::npos) {
+        }
+
+        else if (configText == "latencies") {
+            getline(fin, configText); // skip blank
             //fp_add parse
             getline(fin, configText);
             sscanf(configText.c_str(), "fp_add: %d", &config.fp_add);
             //fp_sub parse
             getline(fin, configText);
             sscanf(configText.c_str(), "fp_sub: %d", &config.fp_sub);
-            //fp_mul parse
+            //fp_mult parse
             getline(fin, configText);
             sscanf(configText.c_str(), "fp_mul: %d", &config.fp_mul);
             //fp_div parse
@@ -217,7 +233,8 @@ Config parseConfig() {
     }
 
     return config;
-};
+}
+
 
 int main() {
     Config config = parseConfig();
@@ -225,7 +242,7 @@ int main() {
     vector<Instruction> trace;
     string line;
     while(getline(cin, line)) {
-        if(line.emptpy()) {
+        if(line.empty()) {
             continue;
         }
         trace.push_back(parseTrace(line));
@@ -250,8 +267,8 @@ int main() {
     cout << endl;
     cout << endl;
 
-    cout <<                    Pipeline Simulation                    << endl;
-    cout << ----------------------------------------------------------- << endl;
+    cout << "                   Pipeline Simulation                   " << endl;
+    cout << "-----------------------------------------------------------" << endl;
 
     //TABLE HERE
 
@@ -264,7 +281,7 @@ int main() {
     cout << "reorder buffer delays: " << endl;
     cout << "reservation station delays: " << endl;
     cout << "data memory conflict delays: " << endl;
-    cout << "true dependence delays " << endl;
+    cout << "true dependence delays: " << endl;
     return 0;
 }
 
