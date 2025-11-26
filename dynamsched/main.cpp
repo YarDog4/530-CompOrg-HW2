@@ -514,7 +514,7 @@ void memory(int cycle) {
         if(inst.exec_end == -1) {
             continue;
         }
-        if (inst.exec_end == cycle) {
+        if (inst.exec_end >= cycle) {
             continue;
         }
         if(inst.memory_read != -1) {
@@ -949,82 +949,79 @@ void write(int cycle) {
 }
 
 void commit(int cycle) {
+    if (nextCommitCycle >= (int)instructions.size()) {
+        return;
+    }
 
+    Instruction &inst = instructions[nextCommitCycle];
+    bool canCommit = false;
+
+    if (inst.type == SW || inst.type == FSW) {
+        if (inst.memory_read != -1 && inst.memory_read < cycle) {
+            canCommit = true;
+        }
+    } else if (inst.type == BEQ || inst.type == BNE) {
+        if (inst.exec_end != -1 && inst.exec_end < cycle) {
+            canCommit = true;
+        }
+    } else {
+        if (inst.writes_results != -1 && inst.writes_results < cycle) {
+            canCommit = true;
+        }
+    }
+
+    if(!canCommit) {
+        return;
+    }
+
+    inst.commits = cycle;
+
+    //free the ROB entry
+    for (int i = 0; i < (int)ROBEntry.size(); i++) {
+        if (ROBEntry[i].busy && ROBEntry[i].instructionInd == nextCommitCycle) {
+
+            string dest = ROBEntry[i].destination;
+
+            ROBEntry[i].busy = false;
+            ROBEntry[i].ready = false;
+            ROBEntry[i].destination = "";
+            ROBEntry[i].instructionInd = -1;
+
+            if (!dest.empty()) {
+                auto it = status.find(dest);
+                if (it != status.end() && it->second == i) {
+                    status.erase(it);
+                }
+            }
+            break;
+        }
+    }
+
+    nextCommitCycle++;
 }
-// void commit(int cycle) {
-//     for(int i = 0; i < (int)ROBEntry.size(); i++) {
-//         ROB &r = ROBEntry[i];
-//         if(!r.busy) {
-//             continue;
-//         }
-        
-//         int id = r.instructionInd;
-//         Instruction &inst = instructions[id];
-//         if(!r.ready) {
-//             continue;
-//         }
 
-//         if (inst.writes_results == cycle) {
-//             continue;
-//         }
-
-//         if(inst.commits != -1) {
-//             continue;
-//         }
-
-//         if (inst.type == SW || inst.type == FSW) {
-//             if (inst.memory_read == -1) {
-//                 continue; 
-//             }
-//             if (inst.memory_read == cycle) {
-//                 continue;
-//             }
-
-//             inst.commits = cycle;
-//         } else if (inst.type == BEQ || inst.type == BNE) {
-//             if (inst.exec_end == -1) {
-//                 continue;
-//             }
-//             if (inst.exec_end == cycle) {
-//                 continue;
-//             }
-//             inst.commits = cycle;
-//         } else {
-//             if (inst.writes_results == -1) {
-//                 continue;
-//             }
-
-//             inst.commits = cycle;
-//         }
-
-//         r.busy = false;
-//         r.ready = false;
-//         r.destination = "";
-//         r.instructionInd = -1;
-
-//         return;
-//     }
-// }
-
-// bool done() {
-//     for (size_t i = 0; i < instructions.size(); i++) {
-//         if(instructions[i].commits == -1) {
-//             return false;
-//         }
-//     }
-//     return true;
-// }
+bool done() {
+    for (size_t i = 0; i < instructions.size(); i++) {
+        if(instructions[i].commits == -1) {
+            return false;
+        }
+    }
+    return true;
+}
 
 void doAll(Config &config) {
     int cycle = 1;
 
-    while (!done()) {
+    int cycle_num = 0;
+
+    while (cycle_num < 200) {
         issue(cycle);       
         execute(cycle, config);
         memory(cycle);
         write(cycle);
         commit(cycle);    
         cycle++;
+        cycle_num++;
     }
 }
 
@@ -1062,6 +1059,7 @@ void printTable() {
 
 int main() {
     Config config = parseConfig();
+    nextCommitCycle = 0;
 
     string line;
     while(getline(cin, line)) {
