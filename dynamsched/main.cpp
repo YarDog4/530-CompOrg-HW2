@@ -65,6 +65,12 @@ struct Reservation {
     bool execStart, execEnd;
 };
 
+//Delay globals
+int reorder_buffer_delays = 0;
+int reservation_station_delays = 0;
+int data_memory_conflict_delays = 0;
+int true_dependence_delays = 0;
+
 //vectors needed for pipeline
 vector<Instruction> instructions;
 vector<ROB> ROBEntry;
@@ -265,7 +271,7 @@ Config parseConfig() {
 
 void issue(int cycle) {
     static int nextIssue = 0;
-    //at the end
+
     if (nextIssue >= (int)instructions.size()) {
         return;
     }
@@ -277,30 +283,23 @@ void issue(int cycle) {
         destination = inst.rd;
     }
 
-    //ROB memory
+   //find free ROB
     int robInd = -1;
     for (int i = 0; i < (int)ROBEntry.size(); i++) {
-        if(!ROBEntry[i].busy) {
+        if (!ROBEntry[i].busy) {
             robInd = i;
             break;
         }
     }
-
-    if(robInd == -1) {
-        return; //no more space left
+    if (robInd == -1) {
+        reorder_buffer_delays++;
+        return; // no ROB space → stall
     }
 
-    //fill ROB
-    ROBEntry[robInd].busy = true;
-    ROBEntry[robInd].ready = false;
-    ROBEntry[robInd].destination = destination;
-    ROBEntry[robInd].instructionInd = nextIssue;
-
-    //need the correct reservation station
     Reservation *RS = NULL;
 
+    //eff-addr unit (loads and stores)
     if (inst.type == LW || inst.type == FLW || inst.type == SW || inst.type == FSW) {
-
         for (int i = 0; i < (int)ADDR.size(); i++) {
             if (!ADDR[i].busy) {
                 RS = &ADDR[i];
@@ -308,6 +307,7 @@ void issue(int cycle) {
             }
         }
     }
+    //FP add / sub
     else if (inst.type == FADD_S || inst.type == FSUB_S) {
         for (int i = 0; i < (int)FPAdd.size(); i++) {
             if (!FPAdd[i].busy) {
@@ -316,6 +316,7 @@ void issue(int cycle) {
             }
         }
     }
+    //FP mul / div
     else if (inst.type == FMUL_S || inst.type == FDIV_S) {
         for (int i = 0; i < (int)FPMul.size(); i++) {
             if (!FPMul[i].busy) {
@@ -324,7 +325,8 @@ void issue(int cycle) {
             }
         }
     }
-    else { // ADD, SUB, BEQ, BNE
+    //integer add / sub / branch
+    else {
         for (int i = 0; i < (int)INT.size(); i++) {
             if (!INT[i].busy) {
                 RS = &INT[i];
@@ -333,8 +335,8 @@ void issue(int cycle) {
         }
     }
 
-    //station is full
-    if(RS == NULL) {
+    if (RS == NULL) {
+        reservation_station_delays++;
         ROBEntry[robInd].busy = false;
         ROBEntry[robInd].ready = false;
         ROBEntry[robInd].destination = "";
@@ -342,7 +344,13 @@ void issue(int cycle) {
         return;
     }
 
-    //fill reservation station
+    //ROB entry
+    ROBEntry[robInd].busy = true;
+    ROBEntry[robInd].ready = false;
+    ROBEntry[robInd].destination = destination;
+    ROBEntry[robInd].instructionInd = nextIssue;
+
+    //RS entry
     RS->busy = true;
     RS->operand = inst.type;
     RS->instructionInd = nextIssue;
@@ -351,37 +359,57 @@ void issue(int cycle) {
     RS->execEnd = false;
     RS->cyclesLeft = 0;
 
-    //ready by default
     RS->vjReady = true;
     RS->vkReady = true;
     RS->qj = -1;
     RS->qk = -1;
 
-    //check dependencies rs1
     if (inst.rs1 != "") {
         if (status.find(inst.rs1) != status.end()) {
-            RS->vjReady = false;
-            RS->qj = status[inst.rs1];
+            int prodROB = status[inst.rs1];
+
+            if (prodROB >= 0 && prodROB < (int)ROBEntry.size() &&
+                ROBEntry[prodROB].ready == true) {
+
+                RS->vjReady = true;
+                RS->qj = -1;
+            }
+            else {
+                RS->vjReady = false;
+                RS->qj = prodROB;
+            }
         }
     }
 
-    //check dependencies rs2
-     if (inst.rs2 != "") {
+    if (inst.rs2 != "") {
         if (status.find(inst.rs2) != status.end()) {
-            RS->vkReady = false;
-            RS->qk = status[inst.rs2];
+            int prodROB = status[inst.rs2];
+
+            if (prodROB >= 0 && prodROB < (int)ROBEntry.size() &&
+                ROBEntry[prodROB].ready == true) {
+
+                RS->vkReady = true;
+                RS->qk = -1;
+            }
+            else {
+                RS->vkReady = false;
+                RS->qk = prodROB;
+            }
         }
     }
 
-    //update status if inst writes to a regiester
+    
     if (destination != "") {
         status[destination] = robInd;
     }
 
-    //update
+    
     inst.issues = cycle;
+
+    //move to next instruction
     nextIssue++;
 }
+
 
 int latencies(InstructionType inst, const Config &config) {
     switch(inst) {
@@ -406,13 +434,18 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
+        //true dependency delays
+        if(!r.execStart && cycle > inst.issues) {
+            if(!r.vjReady || !r.vkReady) {
+                true_dependence_delays++;
+            }
+        }
+
         //start
-        if (!r.execStart && r.vjReady && r.vkReady) {
-            if(inst.issues < cycle) {
+        if (!r.execStart && r.vjReady && r.vkReady && cycle > inst.issues) {
                 r.execStart = true;
                 r.cyclesLeft = latencies(r.operand, config);
                 inst.exec_start = cycle;
-            }
         }
 
         //lower cycles
@@ -432,7 +465,13 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
-        if (!r.execStart && r.vjReady && r.vkReady) {
+        if(!r.execStart && cycle > inst.issues) {
+            if(!r.vjReady || !r.vkReady) {
+                true_dependence_delays++;
+            }
+        }
+
+        if (!r.execStart && r.vjReady && r.vkReady && cycle > inst.issues) {
             r.execStart = true;
             r.cyclesLeft = latencies(r.operand, config);
             inst.exec_start = cycle;
@@ -454,12 +493,18 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
-        if (!r.execStart && r.vjReady && r.vkReady) {
+        if(!r.execStart && cycle > inst.issues) {
+            if(!r.vjReady || !r.vkReady) {
+                true_dependence_delays++;
+            }
+        }
+
+        if (!r.execStart && r.vjReady && r.vkReady && cycle > inst.issues) {
             r.execStart = true;
             r.cyclesLeft = latencies(r.operand, config);
             inst.exec_start = cycle;
         }
-
+       
         if (r.execStart && r.cyclesLeft > 0) {
             r.cyclesLeft--;
             if (r.cyclesLeft == 0) {
@@ -476,7 +521,13 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
-        if (!r.execStart && r.vjReady && r.vkReady) {
+        if(!r.execStart && cycle > inst.issues) {
+            if(!r.vjReady || !r.vkReady) {
+                true_dependence_delays++;
+            }
+        }
+
+        if (!r.execStart && r.vjReady && r.vkReady && cycle > inst.issues) {
             r.execStart = true;
             r.cyclesLeft = latencies(r.operand, config);
             inst.exec_start = cycle;
@@ -521,6 +572,7 @@ void memory(int cycle) {
             continue;
         }
         if (memoryHit) {
+            data_memory_conflict_delays++;
             continue;
         }
 
@@ -530,422 +582,213 @@ void memory(int cycle) {
 }
 
 void write(int cycle) {
+
+    bool cdbBusy = false;
+
     
-    //address/eff-addr RS
+
+    //ADDRESS / LOAD-STORE RS  (LW, FLW)
     for (int i = 0; i < (int)ADDR.size(); i++) {
         Reservation &r = ADDR[i];
-        if (!r.busy) {
-            continue;
-        }
+        if (!r.busy) continue;
 
         Instruction &inst = instructions[r.instructionInd];
 
-        //stores and branches do not write
-         if (inst.type == SW || inst.type == FSW ) {
-            continue;
-        }
+        //stores do NOT write back
+        if (inst.type == SW || inst.type == FSW) continue;
 
-        if(!r.execEnd) {
-            continue;
-        }
+        if (!r.execEnd) continue;
 
-       if (inst.type == LW || inst.type == FLW) {
-            if (inst.memory_read == -1) {
-                continue;
-            }      
-            if (inst.memory_read >= cycle) {
-                continue;
-            } 
-            if (inst.exec_end >= cycle) {
-                continue;
-            }
+        //special rule for loads: must wait for memory_read
+        if (inst.type == LW || inst.type == FLW) {
+            if (inst.memory_read == -1) continue;
+            if (inst.memory_read >= cycle) continue;
         } else {
-             if(!r.execEnd) {
-                continue;
-            }
-            if (inst.exec_end >= cycle) {
-                continue;
-            }
+            if (inst.exec_end >= cycle) continue;      
         }
 
-        //already wrote
-        if(inst.writes_results != -1) {
-            continue;
-        }
+        if (inst.writes_results != -1) continue;
+
+        if (cdbBusy) continue;
 
         //perform writeback
         inst.writes_results = cycle;
-        
+        cdbBusy = true;
+
         int robInd = r.robInd;
-        if(robInd >= 0 && robInd < (int)ROBEntry.size()) {
+        if (robInd >= 0 && robInd < (int)ROBEntry.size())
             ROBEntry[robInd].ready = true;
+
+        for (int j = 0; j < (int)ADDR.size(); j++) {
+            if (ADDR[j].busy && ADDR[j].qj == robInd) { ADDR[j].qj = -1; ADDR[j].vjReady = true; }
+            if (ADDR[j].busy && ADDR[j].qk == robInd) { ADDR[j].qk = -1; ADDR[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPAdd.size(); j++) {
+            if (FPAdd[j].busy && FPAdd[j].qj == robInd) { FPAdd[j].qj = -1; FPAdd[j].vjReady = true; }
+            if (FPAdd[j].busy && FPAdd[j].qk == robInd) { FPAdd[j].qk = -1; FPAdd[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPMul.size(); j++) {
+            if (FPMul[j].busy && FPMul[j].qj == robInd) { FPMul[j].qj = -1; FPMul[j].vjReady = true; }
+            if (FPMul[j].busy && FPMul[j].qk == robInd) { FPMul[j].qk = -1; FPMul[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)INT.size(); j++) {
+            if (INT[j].busy && INT[j].qj == robInd) { INT[j].qj = -1; INT[j].vjReady = true; }
+            if (INT[j].busy && INT[j].qk == robInd) { INT[j].qk = -1; INT[j].vkReady = true; }
         }
 
-        //CDB on buffers
-        for (int j = 0; j < (int)ADDR.size(); j ++) {
-            Reservation &rr = ADDR[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPAdd.size(); j ++) {
-            Reservation &rr = FPAdd[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPMul.size(); j ++) {
-            Reservation &rr = FPMul[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)INT.size(); j ++) {
-            Reservation &rr = INT[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-
-        //free RS
         r.busy = false;
         r.execStart = false;
         r.execEnd = false;
-        r.cyclesLeft = 0;
         r.qj = r.qk = -1;
         r.vjReady = r.vkReady = false;
+        r.cyclesLeft = 0;
+
         return;
     }
 
+    //FP ADD/SUB RS
     for (int i = 0; i < (int)FPAdd.size(); i++) {
         Reservation &r = FPAdd[i];
-        if (!r.busy) {
-            continue;
-        }
+        if (!r.busy) continue;
 
         Instruction &inst = instructions[r.instructionInd];
+        if (inst.type != FADD_S && inst.type != FSUB_S) continue;
 
-        //if this ever happens edge case handling
-        if (inst.type != FADD_S && inst.type != FSUB_S) {
-            continue;
-        }
+        if (!r.execEnd) continue;
+        if (inst.exec_end >= cycle) continue;
+        if (inst.writes_results != -1) continue;
 
-        if(!r.execEnd) {
-            continue;
-        }
-        if (inst.exec_end >= cycle){
-            continue;
-        }
-        //already wrote
-        if(inst.writes_results != -1) {
-            continue;
-        }
-        //perform writeback
+        if (cdbBusy) continue;
+
         inst.writes_results = cycle;
-        
+        cdbBusy = true;
+
         int robInd = r.robInd;
-        if(robInd >= 0 && robInd < (int)ROBEntry.size()) {
+        if (robInd >= 0 && robInd < (int)ROBEntry.size())
             ROBEntry[robInd].ready = true;
+
+        for (int j = 0; j < (int)ADDR.size(); j++) {
+            if (ADDR[j].busy && ADDR[j].qj == robInd) { ADDR[j].qj = -1; ADDR[j].vjReady = true; }
+            if (ADDR[j].busy && ADDR[j].qk == robInd) { ADDR[j].qk = -1; ADDR[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPAdd.size(); j++) {
+            if (FPAdd[j].busy && FPAdd[j].qj == robInd) { FPAdd[j].qj = -1; FPAdd[j].vjReady = true; }
+            if (FPAdd[j].busy && FPAdd[j].qk == robInd) { FPAdd[j].qk = -1; FPAdd[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPMul.size(); j++) {
+            if (FPMul[j].busy && FPMul[j].qj == robInd) { FPMul[j].qj = -1; FPMul[j].vjReady = true; }
+            if (FPMul[j].busy && FPMul[j].qk == robInd) { FPMul[j].qk = -1; FPMul[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)INT.size(); j++) {
+            if (INT[j].busy && INT[j].qj == robInd) { INT[j].qj = -1; INT[j].vjReady = true; }
+            if (INT[j].busy && INT[j].qk == robInd) { INT[j].qk = -1; INT[j].vkReady = true; }
         }
 
-        //CDB on buffers
-        for (int j = 0; j < (int)ADDR.size(); j ++) {
-            Reservation &rr = ADDR[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPAdd.size(); j ++) {
-            Reservation &rr = FPAdd[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPMul.size(); j ++) {
-            Reservation &rr = FPMul[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)INT.size(); j ++) {
-            Reservation &rr = INT[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-
-        //free RS
         r.busy = false;
         r.execStart = false;
         r.execEnd = false;
-        r.cyclesLeft = 0;
         r.qj = r.qk = -1;
         r.vjReady = r.vkReady = false;
+        r.cyclesLeft = 0;
+
         return;
     }
 
+    //FP MUL/DIV RS
     for (int i = 0; i < (int)FPMul.size(); i++) {
         Reservation &r = FPMul[i];
-        if (!r.busy) {
-            continue;
-        }
+        if (!r.busy) continue;
+
         Instruction &inst = instructions[r.instructionInd];
+        if (inst.type != FMUL_S && inst.type != FDIV_S) continue;
 
-        //again edge case
-        if (inst.type != FMUL_S && inst.type != FDIV_S) {
-            continue;
-        }
-        if(!r.execEnd) {
-            continue;
-        }
-        if(inst.exec_end >= cycle) {
-            continue;
-        }
+        if (!r.execEnd) continue;
+        if (inst.exec_end >= cycle) continue;
+        if (inst.writes_results != -1) continue;
 
-        if(inst.writes_results != -1) {
-            continue;
-        }
+        if (cdbBusy) continue;
+
+        inst.writes_results = cycle;
+        cdbBusy = true;
 
         int robInd = r.robInd;
-        inst.writes_results = cycle;
-
-        if(robInd >= 0 && robInd < (int)ROBEntry.size()) {
+        if (robInd >= 0 && robInd < (int)ROBEntry.size())
             ROBEntry[robInd].ready = true;
+
+        for (int j = 0; j < (int)ADDR.size(); j++) {
+            if (ADDR[j].busy && ADDR[j].qj == robInd) { ADDR[j].qj = -1; ADDR[j].vjReady = true; }
+            if (ADDR[j].busy && ADDR[j].qk == robInd) { ADDR[j].qk = -1; ADDR[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPAdd.size(); j++) {
+            if (FPAdd[j].busy && FPAdd[j].qj == robInd) { FPAdd[j].qj = -1; FPAdd[j].vjReady = true; }
+            if (FPAdd[j].busy && FPAdd[j].qk == robInd) { FPAdd[j].qk = -1; FPAdd[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPMul.size(); j++) {
+            if (FPMul[j].busy && FPMul[j].qj == robInd) { FPMul[j].qj = -1; FPMul[j].vjReady = true; }
+            if (FPMul[j].busy && FPMul[j].qk == robInd) { FPMul[j].qk = -1; FPMul[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)INT.size(); j++) {
+            if (INT[j].busy && INT[j].qj == robInd) { INT[j].qj = -1; INT[j].vjReady = true; }
+            if (INT[j].busy && INT[j].qk == robInd) { INT[j].qk = -1; INT[j].vkReady = true; }
         }
 
-        //CDB on buffers
-        for (int j = 0; j < (int)ADDR.size(); j ++) {
-            Reservation &rr = ADDR[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPAdd.size(); j ++) {
-            Reservation &rr = FPAdd[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPMul.size(); j ++) {
-            Reservation &rr = FPMul[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)INT.size(); j ++) {
-            Reservation &rr = INT[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-
-        //free RS
         r.busy = false;
         r.execStart = false;
         r.execEnd = false;
-        r.cyclesLeft = 0;
         r.qj = r.qk = -1;
         r.vjReady = r.vkReady = false;
+        r.cyclesLeft = 0;
+
         return;
     }
 
+    //integer RS
     for (int i = 0; i < (int)INT.size(); i++) {
         Reservation &r = INT[i];
-        if (!r.busy) {
-            continue;
-        }
+        if (!r.busy) continue;
 
         Instruction &inst = instructions[r.instructionInd];
+        if (inst.type == BEQ || inst.type == BNE) continue;  //branches do not write
 
-        //branches do not write
-         if (inst.type == BEQ || inst.type == BNE) {
-            continue;
-        }
+        if (!r.execEnd) continue;
+        if (inst.exec_end >= cycle) continue;
+        if (inst.writes_results != -1) continue;
 
-        if(!r.execEnd) {
-            continue;
-        }
-
-        if(inst.exec_end >= cycle) {
-            continue;
-        }
-
-        if(inst.writes_results != -1) {
-            continue;
-        }
+        if (cdbBusy) continue;
 
         inst.writes_results = cycle;
+        cdbBusy = true;
+
         int robInd = r.robInd;
-
-        if(robInd >= 0 && robInd < (int)ROBEntry.size()) {
+        if (robInd >= 0 && robInd < (int)ROBEntry.size())
             ROBEntry[robInd].ready = true;
+
+        for (int j = 0; j < (int)ADDR.size(); j++) {
+            if (ADDR[j].busy && ADDR[j].qj == robInd) { ADDR[j].qj = -1; ADDR[j].vjReady = true; }
+            if (ADDR[j].busy && ADDR[j].qk == robInd) { ADDR[j].qk = -1; ADDR[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPAdd.size(); j++) {
+            if (FPAdd[j].busy && FPAdd[j].qj == robInd) { FPAdd[j].qj = -1; FPAdd[j].vjReady = true; }
+            if (FPAdd[j].busy && FPAdd[j].qk == robInd) { FPAdd[j].qk = -1; FPAdd[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)FPMul.size(); j++) {
+            if (FPMul[j].busy && FPMul[j].qj == robInd) { FPMul[j].qj = -1; FPMul[j].vjReady = true; }
+            if (FPMul[j].busy && FPMul[j].qk == robInd) { FPMul[j].qk = -1; FPMul[j].vkReady = true; }
+        }
+        for (int j = 0; j < (int)INT.size(); j++) {
+            if (INT[j].busy && INT[j].qj == robInd) { INT[j].qj = -1; INT[j].vjReady = true; }
+            if (INT[j].busy && INT[j].qk == robInd) { INT[j].qk = -1; INT[j].vkReady = true; }
         }
 
-        //CDB on buffers
-        for (int j = 0; j < (int)ADDR.size(); j ++) {
-            Reservation &rr = ADDR[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPAdd.size(); j ++) {
-            Reservation &rr = FPAdd[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)FPMul.size(); j ++) {
-            Reservation &rr = FPMul[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-        for (int j = 0; j < (int)INT.size(); j ++) {
-            Reservation &rr = INT[j];
-            if(!rr.busy) {
-                continue;
-            }
-            if(rr.qj == robInd) {
-                rr.qj = -1;
-                rr.vjReady = true;
-            }
-            if(rr.qk == robInd) {
-                rr.qk = -1;
-                rr.vkReady = true;
-            }
-        }
-
-        //free RS
         r.busy = false;
         r.execStart = false;
         r.execEnd = false;
-        r.cyclesLeft = 0;
         r.qj = r.qk = -1;
         r.vjReady = r.vkReady = false;
-        return;
+        r.cyclesLeft = 0;
 
+        return;
     }
-        
 }
 
 void commit(int cycle) {
@@ -996,7 +839,6 @@ void commit(int cycle) {
             break;
         }
     }
-
     nextCommitCycle++;
 }
 
@@ -1012,16 +854,18 @@ bool done() {
 void doAll(Config &config) {
     int cycle = 1;
 
-    int cycle_num = 0;
 
-    while (cycle_num < 200) {
+    //debug
+    const int MAX = 50;
+    while (cycle <= MAX) {
         issue(cycle);       
         execute(cycle, config);
         memory(cycle);
         write(cycle);
-        commit(cycle);    
+        commit(cycle);  
+        
+        if(done()) break;
         cycle++;
-        cycle_num++;
     }
 }
 
@@ -1130,10 +974,10 @@ int main() {
     cout << "Delays" << endl;
     cout << "------" << endl;
 
-    cout << "reorder buffer delays: " << endl;
-    cout << "reservation station delays: " << endl;
-    cout << "data memory conflict delays: " << endl;
-    cout << "true dependence delays: " << endl;
+    cout << "reorder buffer delays: " << reorder_buffer_delays << endl;
+    cout << "reservation station delays: " << reservation_station_delays << endl;
+    cout << "data memory conflict delays: " << data_memory_conflict_delays << endl;
+    cout << "true dependence delays: " << true_dependence_delays <<endl;
     return 0;
 }
 
