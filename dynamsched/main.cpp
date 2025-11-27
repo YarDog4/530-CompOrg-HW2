@@ -1,6 +1,10 @@
 //Yaren Dogan
 //Assignment 1: Speculative Dynamically Scheduled Pipeline Simulator
-//11/16/2025
+//11/26/2025
+
+//how to compile:
+// g++ -o main main.cpp 
+// ./main < trace.dat
 
 #include <iostream>
 #include <string>
@@ -10,6 +14,7 @@
 #include <cstdio>
 #include <unordered_map>
 #include <iomanip>
+#include <algorithm>
 
 using namespace std;
 
@@ -66,9 +71,12 @@ struct Reservation {
     
     int cyclesLeft;
     bool execStart, execEnd;
+
+    //cycle when this RS should become free
+    int freeAtCycle;
 };
 
-//Delay globals
+//delay globals
 int reorder_buffer_delays = 0;
 int reservation_station_delays = 0;
 int data_memory_conflict_delays = 0;
@@ -80,6 +88,23 @@ vector<ROB> ROBEntry;
 vector<Reservation> ADDR, FPAdd, FPMul, INT;
 unordered_map<string, int> status;
 int nextCommitCycle = 0; //keeps tracks of the commit cycle
+
+//helper to clear an RS
+void clearReservation(Reservation &r) {
+    r.busy = false;
+    r.execStart = false;
+    r.execEnd = false;
+    r.qj = -1;
+    r.qk = -1;
+    r.vjReady = false;
+    r.vkReady = false;
+    r.vjReadyCycle = -1;
+    r.vkReadyCycle = -1;
+    r.cyclesLeft = 0;
+    r.freeAtCycle = 0;
+    r.instructionInd = -1;
+    r.robInd = -1;
+}
 
 Instruction parseTrace(const string &line) {
     Instruction instruction;
@@ -272,6 +297,46 @@ Config parseConfig() {
     return config;
 }
 
+int latencies(InstructionType inst, const Config &config) {
+    switch(inst) {
+        case FADD_S:
+            return config.fp_add;
+        case FSUB_S:
+            return config.fp_sub;
+        case FMUL_S:
+            return config.fp_mul;
+        case FDIV_S:
+            return config.fp_div;
+        default:
+            return 1;
+    }
+}
+
+//had help from AI with this one, i lost my freaking mind
+void freeReadyStations(int cycle) {
+    //free any RS whose freeAtCycle has arrived
+    for (auto &r : ADDR) {
+        if (r.busy && r.freeAtCycle > 0 && r.freeAtCycle <= cycle) {
+            clearReservation(r);
+        }
+    }
+    for (auto &r : FPAdd) {
+        if (r.busy && r.freeAtCycle > 0 && r.freeAtCycle <= cycle) {
+            clearReservation(r);
+        }
+    }
+    for (auto &r : FPMul) {
+        if (r.busy && r.freeAtCycle > 0 && r.freeAtCycle <= cycle) {
+            clearReservation(r);
+        }
+    }
+    for (auto &r : INT) {
+        if (r.busy && r.freeAtCycle > 0 && r.freeAtCycle <= cycle) {
+            clearReservation(r);
+        }
+    }
+}
+
 void issue(int cycle) {
     static int nextIssue = 0;
 
@@ -296,7 +361,7 @@ void issue(int cycle) {
     }
     if (robInd == -1) {
         reorder_buffer_delays++;
-        return; // no ROB space → stall
+        return; //no ROB space - stall
     }
 
     Reservation *RS = NULL;
@@ -357,12 +422,16 @@ void issue(int cycle) {
     RS->execStart = false;
     RS->execEnd = false;
     RS->cyclesLeft = 0;
+    RS->freeAtCycle = 0;
 
     RS->vjReady = true;
     RS->vkReady = true;
     RS->qj = -1;
     RS->qk = -1;
+    RS->vjReadyCycle = -1;
+    RS->vkReadyCycle = -1;
 
+    // source 1
     if (inst.rs1 != "") {
         if (status.find(inst.rs1) != status.end()) {
             int prodROB = status[inst.rs1];
@@ -370,6 +439,7 @@ void issue(int cycle) {
             if (prodROB >= 0 && prodROB < (int)ROBEntry.size() && ROBEntry[prodROB].ready == true) {
                 RS->vjReady = true;
                 RS->qj = -1;
+                RS->vjReadyCycle = ROBEntry[prodROB].instructionInd; // not used strictly, but mark
             }
             else {
                 RS->vjReady = false;
@@ -378,6 +448,7 @@ void issue(int cycle) {
         }
     }
 
+    //second register
     if (inst.rs2 != "") {
         if (status.find(inst.rs2) != status.end()) {
             int prodROB = status[inst.rs2];
@@ -385,6 +456,7 @@ void issue(int cycle) {
             if (prodROB >= 0 && prodROB < (int)ROBEntry.size() && ROBEntry[prodROB].ready == true) {
                 RS->vkReady = true;
                 RS->qk = -1;
+                RS->vkReadyCycle = ROBEntry[prodROB].instructionInd;
             }
             else {
                 RS->vkReady = false;
@@ -403,21 +475,6 @@ void issue(int cycle) {
     nextIssue++;
 }
 
-int latencies(InstructionType inst, const Config &config) {
-    switch(inst) {
-        case FADD_S:
-            return config.fp_add;
-        case FSUB_S:
-            return config.fp_sub;
-        case FMUL_S:
-            return config.fp_mul;
-        case FDIV_S:
-            return config.fp_div;
-        default:
-            return 1;
-    }
-}
-
 void execute(int cycle, const Config &config) {
     //eff addr reservation
     for (int i = 0; i < (int)ADDR.size(); i++) {
@@ -425,23 +482,17 @@ void execute(int cycle, const Config &config) {
         if (!r.busy) {
             continue;
         }
-
+        
         Instruction &inst = instructions[r.instructionInd];
 
-        //true dependency delays
-        if(!r.execStart && cycle > inst.issues) {
-            if(!r.vjReady || !r.vkReady) {
-                true_dependence_delays++;
-            }
-        }
-
-        //when all operands are usable
-        int opReadyCycle = inst.issues;
-        if (r.vjReady && r.vjReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vjReadyCycle;
-        }
-        if (r.vkReady && r.vkReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vkReadyCycle;
+        int opReadyCycle = max(
+            {inst.issues,
+            r.vjReady ? r.vjReadyCycle : 999999,
+            r.vkReady ? r.vkReadyCycle : 999999
+        });
+        
+        if (!r.execStart && cycle >= inst.issues && cycle <= opReadyCycle) {
+            true_dependence_delays++;
         }
 
         //start
@@ -459,16 +510,9 @@ void execute(int cycle, const Config &config) {
                 inst.exec_end = cycle;
 
                 if (inst.type == SW || inst.type == FSW) {
-                    r.busy = false;
-                    r.execStart = false;
-                    r.execEnd = false;
-                    r.qj = -1;
-                    r.qk = -1;
-                    r.vjReady = false;
-                    r.vkReady = false;
-                    r.vjReadyCycle = -1;
-                    r.vkReadyCycle = -1;
-                    r.cyclesLeft = 0;
+                    //stores do not WB
+                    //free at the start of the next cycle
+                    r.freeAtCycle = cycle + 1;
                 }
             }
         }
@@ -483,19 +527,15 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
-        if(!r.execStart && cycle > inst.issues) {
-            if(!r.vjReady || !r.vkReady) {
-                true_dependence_delays++;
-            }
-        }
+        int opReadyCycle = max(
+            {inst.issues,
+            r.vjReady ? r.vjReadyCycle : 999999,
+            r.vkReady ? r.vkReadyCycle : 999999
+        });
 
-        int opReadyCycle = inst.issues;
-        if (r.vjReady && r.vjReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vjReadyCycle;
-        }
-        if (r.vkReady && r.vkReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vkReadyCycle;
-        }
+       if (!r.execStart && cycle >= inst.issues && cycle <= opReadyCycle) {
+            true_dependence_delays++;
+       }
 
         if (!r.execStart && r.vjReady && r.vkReady && cycle > opReadyCycle) {
             r.execStart = true;
@@ -521,19 +561,14 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
-        if(!r.execStart && cycle > inst.issues) {
-            if(!r.vjReady || !r.vkReady) {
-                true_dependence_delays++;
-            }
-        }
-
-        int opReadyCycle = inst.issues;
-        if (r.vjReady && r.vjReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vjReadyCycle;
-        }
-        if (r.vkReady && r.vkReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vkReadyCycle;
-        }
+        int opReadyCycle = max(
+            {inst.issues,
+            r.vjReady ? r.vjReadyCycle : 999999,
+            r.vkReady ? r.vkReadyCycle : 999999});
+       
+        if (!r.execStart && cycle >= inst.issues && cycle <= opReadyCycle) {
+            true_dependence_delays++;
+        }       
 
         if (!r.execStart && r.vjReady && r.vkReady && cycle > opReadyCycle) {
             r.execStart = true;
@@ -559,18 +594,13 @@ void execute(int cycle, const Config &config) {
 
         Instruction &inst = instructions[r.instructionInd];
 
-        if(!r.execStart && cycle > inst.issues) {
-            if(!r.vjReady || !r.vkReady) {
-                true_dependence_delays++;
-            }
-        }
+        int opReadyCycle = max(
+            {inst.issues,
+            r.vjReady ? r.vjReadyCycle : 999999,
+            r.vkReady ? r.vkReadyCycle : 999999});
 
-        int opReadyCycle = inst.issues;
-        if (r.vjReady && r.vjReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vjReadyCycle;
-        }
-        if (r.vkReady && r.vkReadyCycle > opReadyCycle) {
-            opReadyCycle = r.vkReadyCycle;
+        if (!r.execStart && cycle >= inst.issues && cycle <= opReadyCycle) {
+            true_dependence_delays++;
         }
 
         if (!r.execStart && r.vjReady && r.vkReady && cycle > opReadyCycle) {
@@ -585,18 +615,10 @@ void execute(int cycle, const Config &config) {
                 r.execEnd = true;
                 inst.exec_end = cycle;
 
-                //branches dont write back
+                //branches dont write back: 
+                //free at start of next
                 if (inst.type == BEQ || inst.type == BNE) {
-                    r.busy = false;
-                    r.execStart = false;
-                    r.execEnd = false;
-                    r.qj = -1;
-                    r.qk = -1;
-                    r.vjReady = false;
-                    r.vkReady = false;
-                    r.vjReadyCycle = -1;
-                    r.vkReadyCycle = -1;
-                    r.cyclesLeft = 0;
+                    r.freeAtCycle = cycle + 1;
                 }
             }
         }
@@ -606,27 +628,24 @@ void execute(int cycle, const Config &config) {
 void memory(int cycle) {
     int chosen = -1;  // index into instructions
 
-    // 1) pick one LOAD that finished EX before this cycle, hasn't read yet
-    //    and is not blocked by older mem ops to the same address
     for (int i = 0; i < (int)instructions.size(); i++) {
         Instruction &inst = instructions[i];
 
-        // only loads
+        //only loads
         if (!(inst.type == LW || inst.type == FLW)) {
             continue;
         }
 
-        // must have finished EX strictly before this cycle
+        //must have finished EX
         if (inst.exec_end == -1 || inst.exec_end >= cycle) {
             continue;
         }
 
-        // must not already have memory_read
         if (inst.memory_read != -1) {
             continue;
         }
 
-        // check older memory ops with same address tag
+        //check older memory ops with same address tag
         bool blocked = false;
         for (int j = 0; j < i; j++) {
             Instruction &older = instructions[j];
@@ -639,14 +658,12 @@ void memory(int cycle) {
                 continue;
             }
 
-            // older load: must have already read
             if (older.type == LW || older.type == FLW) {
                 if (older.memory_read == -1 || older.memory_read >= cycle) {
                     blocked = true;
                     break;
                 }
             }
-            // older store: must have committed
             if (older.type == SW || older.type == FSW) {
                 if (older.commits == -1 || older.commits >= cycle) {
                     blocked = true;
@@ -660,7 +677,6 @@ void memory(int cycle) {
             continue;
         }
 
-        // first unblocked candidate in program order wins
         chosen = i;
         break;
     }
@@ -669,7 +685,6 @@ void memory(int cycle) {
         instructions[chosen].memory_read = cycle;
     }
 }
-
 
 void write(int cycle) {
     
@@ -877,17 +892,8 @@ void write(int cycle) {
         }
     }
 
-    //free the RS
-    r.busy = false;
-    r.execStart = false;
-    r.execEnd = false;
-    r.qj = -1;
-    r.qk = -1;
-    r.vjReady = false;
-    r.vkReady = false;
-    r.vkReadyCycle = -1;
-    r.vjReadyCycle = -1;
-    r.cyclesLeft = 0;
+    //free the RS for everything that DOES write back (loads, FP, ADD/SUB)
+    clearReservation(r);
 }
 
 void commit(int cycle) {
@@ -956,6 +962,8 @@ void doAll(Config &config) {
     //debug
     const int MAX = 1000;
     while (cycle <= MAX && !done()) {
+        // free any RS whose lifetime ended before this cycle starts
+        freeReadyStations(cycle);
         commit(cycle);  
         write(cycle);
         memory(cycle);
@@ -964,7 +972,6 @@ void doAll(Config &config) {
         cycle++;
     }
 }
-
 
 void printTable() {
     cout << "                    Pipeline Simulation                    " << endl;
@@ -982,18 +989,26 @@ void printTable() {
 
         cout << right << setw(6) << (inst.issues == -1 ? "" : to_string(inst.issues));
 
-        if (inst.exec_start == -1)
-            cout << setw(9) << "";
-        else {
-            string ex = to_string(inst.exec_start) + " - " +(inst.exec_end == -1 ? "" : to_string(inst.exec_end));
-            cout << setw(9) << ex;
+        if (inst.exec_start == -1) {
+            cout << setw(10) << "";
+        } else {
+            string ex;
+
+            if (inst.exec_end == -1)
+                ex = "";
+            else {
+                char buf[20];
+                snprintf(buf, sizeof(buf), "%3d -%3d", inst.exec_start, inst.exec_end);
+                ex = string(buf);
+            }
+            cout << setw(10) << ex;
         }
 
-    cout << setw(7) << (inst.memory_read == -1 ? "" : to_string(inst.memory_read));
-    cout << setw(7) << (inst.writes_results == -1 ? "" : to_string(inst.writes_results));
-    cout << setw(8) << (inst.commits == -1 ? "" : to_string(inst.commits));
+        cout << setw(6) << (inst.memory_read == -1 ? "" : to_string(inst.memory_read));
+        cout << setw(6) << (inst.writes_results == -1 ? "" : to_string(inst.writes_results));
+        cout << setw(7) << (inst.commits == -1 ? "" : to_string(inst.commits));
 
-    cout << endl;
+        cout << endl;
     }
 }
 
@@ -1031,15 +1046,19 @@ int main() {
     }
     for (int i = 0; i < (int)ADDR.size(); i++) {
         ADDR[i].busy = false;
+        ADDR[i].freeAtCycle = 0;
     }
     for (int i = 0; i < (int)FPAdd.size(); i++) {
         FPAdd[i].busy = false;
+        FPAdd[i].freeAtCycle = 0;
     }
     for (int i = 0; i < (int)FPMul.size(); i++) {
         FPMul[i].busy = false;
+        FPMul[i].freeAtCycle = 0;
     }
     for (int i = 0; i < (int)INT.size(); i++) {
         INT[i].busy = false;
+        INT[i].freeAtCycle = 0;
     }
 
     cout << "Configuration" << endl;
