@@ -403,7 +403,6 @@ void issue(int cycle) {
     nextIssue++;
 }
 
-
 int latencies(InstructionType inst, const Config &config) {
     switch(inst) {
         case FADD_S:
@@ -605,54 +604,72 @@ void execute(int cycle, const Config &config) {
 }
 
 void memory(int cycle) {
-    int memoryHit = 0;
+    int chosen = -1;  // index into instructions
 
-    for(int i = 0; i < (int)ADDR.size(); i++) {
-        Reservation &r = ADDR[i];
-        if (!r.busy) {
-            continue;
-        }
+    // 1) pick one LOAD that finished EX before this cycle, hasn't read yet
+    //    and is not blocked by older mem ops to the same address
+    for (int i = 0; i < (int)instructions.size(); i++) {
+        Instruction &inst = instructions[i];
 
-        Instruction &inst = instructions[r.instructionInd];
-        
-        //only loads and stores take a cycle up at memory
+        // only loads
         if (!(inst.type == LW || inst.type == FLW)) {
             continue;
         }
 
-        if (!r.execEnd) {
+        // must have finished EX strictly before this cycle
+        if (inst.exec_end == -1 || inst.exec_end >= cycle) {
             continue;
         }
-        if(inst.exec_end == -1) {
+
+        // must not already have memory_read
+        if (inst.memory_read != -1) {
             continue;
         }
-        if (inst.exec_end >= cycle) {
-            continue;
+
+        // check older memory ops with same address tag
+        bool blocked = false;
+        for (int j = 0; j < i; j++) {
+            Instruction &older = instructions[j];
+
+            if (!(older.type == LW || older.type == FLW ||
+                  older.type == SW || older.type == FSW)) {
+                continue;
+            }
+            if (older.address != inst.address) {
+                continue;
+            }
+
+            // older load: must have already read
+            if (older.type == LW || older.type == FLW) {
+                if (older.memory_read == -1 || older.memory_read >= cycle) {
+                    blocked = true;
+                    break;
+                }
+            }
+            // older store: must have committed
+            if (older.type == SW || older.type == FSW) {
+                if (older.commits == -1 || older.commits >= cycle) {
+                    blocked = true;
+                    break;
+                }
+            }
         }
-        if(inst.memory_read != -1) {
-            continue;
-        }
-        if (memoryHit) {
+
+        if (blocked) {
             data_memory_conflict_delays++;
             continue;
         }
 
-        inst.memory_read = cycle;
-        memoryHit = 1;
+        // first unblocked candidate in program order wins
+        chosen = i;
+        break;
+    }
 
-        //do not write to cdb
-        if (inst.type == SW || inst.type == FSW) {
-            r.busy = false;
-            r.execStart = false;
-            r.execEnd = false;
-            r.qj = -1;
-            r.qk = -1;
-            r.vjReady = false;
-            r.vkReady = false;
-            r.cyclesLeft = 0;
-        }
+    if (chosen != -1) {
+        instructions[chosen].memory_read = cycle;
     }
 }
+
 
 void write(int cycle) {
     
@@ -872,8 +889,6 @@ void write(int cycle) {
     r.vjReadyCycle = -1;
     r.cyclesLeft = 0;
 }
-
-
 
 void commit(int cycle) {
     if (nextCommitCycle >= (int)instructions.size()) {
